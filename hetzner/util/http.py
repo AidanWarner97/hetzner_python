@@ -37,6 +37,11 @@ class ValidatedHTTPSConnection(HTTPSConnection):
         -----END CERTIFICATE-----
     '''
 
+    def __init__(self, *args, **kwargs):
+        super(ValidatedHTTPSConnection, self).__init__(*args, **kwargs)
+        self.key_file = kwargs.get('key_file', None)
+        self.cert_file = kwargs.get('cert_file', None)
+
     def get_ca_cert_bundle(self):
         via_env = os.getenv('SSL_CERT_FILE')
         if via_env is not None and os.path.exists(via_env):
@@ -56,15 +61,29 @@ class ValidatedHTTPSConnection(HTTPSConnection):
                                         self.timeout,
                                         self.source_address)
         bundle = cafile = self.get_ca_cert_bundle()
+        ca_certs_temp_file = None
+        
         if bundle is None:
-            ca_certs = NamedTemporaryFile()
-            ca_certs.write('\n'.join(
+            ca_certs_temp_file = NamedTemporaryFile(delete=False)
+            ca_certs_temp_file.write('\n'.join(
                 map(str.strip, self.CA_ROOT_CERT_FALLBACK.splitlines())
             ).encode('ascii'))
-            ca_certs.flush()
-            cafile = ca_certs.name
-        self.sock = ssl.wrap_socket(sock, self.key_file, self.cert_file,
-                                    cert_reqs=ssl.CERT_REQUIRED,
-                                    ca_certs=cafile)
-        if bundle is None:
-            ca_certs.close()
+            ca_certs_temp_file.flush()
+            cafile = ca_certs_temp_file.name
+            ca_certs_temp_file.close()
+        
+        # Use modern SSL context instead of deprecated wrap_socket
+        context = ssl.create_default_context()
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        
+        if cafile:
+            context.load_verify_locations(cafile)
+            
+        if self.key_file and self.cert_file:
+            context.load_cert_chain(self.cert_file, self.key_file)
+            
+        self.sock = context.wrap_socket(sock, server_hostname=self.host)
+        
+        if ca_certs_temp_file is not None and cafile:
+            os.unlink(cafile)
